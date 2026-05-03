@@ -40,3 +40,4 @@ Icon?
 # Swift Package Manager
 .build/
 .swiftpm/
+FlutterFramework/

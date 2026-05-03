@@ -1,3 +1,5 @@
+import Foundation
+
 public enum SharedAttachmentType: Int, Codable {
     case image
     case video
