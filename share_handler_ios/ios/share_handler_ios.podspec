@@ -13,15 +13,14 @@ Pod::Spec.new do |s|
   s.license          = { :file => '../LICENSE' }
   s.author           = { 'Your Company' => 'email@example.com' }
   s.source           = { :path => '.' }
-  s.source_files = 'Classes/**/*'
+  s.source_files = [
+    'Classes/**/*.{h,m}',
+    'share_handler_ios/Sources/share_handler_ios/**/*.swift'
+  ]
   s.public_header_files = 'Classes/**/*.h'
   s.dependency 'Flutter'
   s.dependency 'share_handler_ios_models'
-  s.subspec 'share_handler_ios_models' do |ss|
-    ss.source_files = './Models/Classes/**/*'
-    ss.public_header_files = './Models/Classes/**/*.h'
-  end
-  s.platform = :ios, '9.0'
+  s.platform = :ios, '14.0'
 
   # Flutter.framework does not contain a i386 slice.
   s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES', 'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386' }
