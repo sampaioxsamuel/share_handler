@@ -1,3 +1,8 @@
+# 0.0.26
+Android - Safely and asynchronously copy shared content URIs
+Android - Fix repeated intents, mixed text/media shares, and plugin lifecycle cleanup
+Android - Migrate to AGP 9 built-in Kotlin support
+iOS - Add UIScene lifecycle support and complete share processing before closing the extension
 # 0.0.25
 Android - Upgrade Android dependencies and tools
 # 0.0.23

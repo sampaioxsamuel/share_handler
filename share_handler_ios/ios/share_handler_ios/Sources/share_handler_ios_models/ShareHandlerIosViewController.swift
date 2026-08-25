@@ -1,6 +1,6 @@
 import UIKit
 import Social
-import MobileCoreServices
+import UniformTypeIdentifiers
 import Photos
 import Intents
 import Contacts
@@ -20,8 +20,9 @@ open class ShareHandlerIosViewController: UIViewController {
     let dataContentType = UTType.data.identifier
     var sharedAttachments: [SharedAttachment] = []
     private var fileNameCounter: [String: Int] = [:]
-    lazy var userDefaults: UserDefaults = {
-        return UserDefaults(suiteName: ShareHandlerIosViewController.appGroupId)!
+    private var hasFailed = false
+    lazy var userDefaults: UserDefaults? = {
+        return UserDefaults(suiteName: ShareHandlerIosViewController.appGroupId)
     }()
 
     public func loadIds() {
@@ -33,19 +34,33 @@ open class ShareHandlerIosViewController: UIViewController {
 
     public override func viewDidLoad() {
         super.viewDidLoad()
+        view.isHidden = true
+        navigationController?.setNavigationBarHidden(true, animated: false)
         loadIds()
         Task {
             await handleInputItems()
         }
     }
 
-    public override func viewDidAppear(_ animated: Bool) {
-        super.viewDidAppear(animated)
-        extensionContext!.completeRequest(returningItems: [], completionHandler: nil)
-    }
-
     func handleInputItems() async {
-        if let content = extensionContext!.inputItems[0] as? NSExtensionItem {
+        guard let extensionContext else {
+            dismissWithError()
+            return
+        }
+
+        let inputItems = extensionContext.inputItems.compactMap { $0 as? NSExtensionItem }
+        guard !inputItems.isEmpty else {
+            dismissWithError()
+            return
+        }
+        guard FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: ShareHandlerIosViewController.appGroupId
+        ) != nil else {
+            dismissWithError()
+            return
+        }
+
+        for content in inputItems {
             if let contents = content.attachments {
                 for (index, attachment) in (contents).enumerated() {
                     do {
@@ -64,13 +79,22 @@ open class ShareHandlerIosViewController: UIViewController {
                         } else {
                             print("Attachment not handled with registered type identifiers: \(attachment.registeredTypeIdentifiers)")
                         }
+                        if hasFailed {
+                            return
+                        }
                     } catch {
                         self.dismissWithError()
+                        return
                     }
                 }
             }
-            redirectToHostApp()
         }
+        let hasMessageIntent = extensionContext.intent is INSendMessageIntent
+        guard !sharedAttachments.isEmpty || !sharedText.isEmpty || hasMessageIntent else {
+            dismissWithError()
+            return
+        }
+        redirectToHostApp()
     }
 
     public func getNewFileUrl(fileName: String) -> URL {
@@ -168,6 +192,8 @@ open class ShareHandlerIosViewController: UIViewController {
             let copied = copyFile(at: url, to: newFileUrl)
             if(copied) {
                 sharedAttachments.append(SharedAttachment.init(path: newFileUrl.absoluteString, type: .video))
+            } else {
+                dismissWithError()
             }
         } else {
             dismissWithError()
@@ -183,6 +209,8 @@ open class ShareHandlerIosViewController: UIViewController {
             let copied = copyFile(at: url, to: newFileUrl)
             if (copied) {
                 sharedAttachments.append(SharedAttachment.init(path: newFileUrl.absoluteString, type: .file))
+            } else {
+                dismissWithError()
             }
         } else {
             dismissWithError()
@@ -198,6 +226,8 @@ open class ShareHandlerIosViewController: UIViewController {
             let copied = copyFile(at: url, to: newFileUrl)
             if (copied) {
                 sharedAttachments.append(SharedAttachment.init(path: newFileUrl.absoluteString, type: .file))
+            } else {
+                dismissWithError()
             }
         } else {
             dismissWithError()
@@ -205,21 +235,25 @@ open class ShareHandlerIosViewController: UIViewController {
     }
 
     public func dismissWithError() {
-        print("[ERROR] Error loading data!")
-        let alert = UIAlertController(title: "Error", message: "Error loading data", preferredStyle: .alert)
-
-        let action = UIAlertAction(title: "Error", style: .cancel) { _ in
-            self.dismiss(animated: true, completion: nil)
+        guard !hasFailed else {
+            return
         }
-
-        alert.addAction(action)
-        present(alert, animated: true, completion: nil)
-        extensionContext!.completeRequest(returningItems: [], completionHandler: nil)
+        hasFailed = true
+        print("[ERROR] Error loading data!")
+        let error = NSError(
+            domain: "com.shoutsocial.share_handler",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "Error loading shared data"]
+        )
+        extensionContext?.cancelRequest(withError: error)
     }
 
     public func redirectToHostApp() {
         loadIds()
-        let url = URL(string: "ShareMedia-\(ShareHandlerIosViewController.hostAppBundleIdentifier)://\(ShareHandlerIosViewController.hostAppBundleIdentifier)?key=\(sharedKey)")
+        guard let url = URL(string: "ShareMedia-\(ShareHandlerIosViewController.hostAppBundleIdentifier)://\(ShareHandlerIosViewController.hostAppBundleIdentifier)?key=\(sharedKey)") else {
+            dismissWithError()
+            return
+        }
         var responder = self as UIResponder?
         let selectorOpenURL = sel_registerName("openURL:")
 
@@ -234,19 +268,36 @@ open class ShareHandlerIosViewController: UIViewController {
 
         let json = sharedMedia.toJson()
 
+        guard let userDefaults else {
+            dismissWithError()
+            return
+        }
         userDefaults.set(json, forKey: sharedKey)
-        userDefaults.synchronize()
+        guard userDefaults.synchronize() else {
+            dismissWithError()
+            return
+        }
 
         while (responder != nil) {
             if let application = responder as? UIApplication {
                 if #available(iOS 18.0, *) {
-                    let _ = application.open(url!, options: [:], completionHandler: nil)
+                    application.open(url, options: [:]) { [weak self] success in
+                        if success {
+                            self?.extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
+                        } else {
+                            self?.dismissWithError()
+                        }
+                    }
                 } else {
                     let _ = application.perform(selectorOpenURL, with: url)
+                    extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
                 }
+                return
             }
             responder = responder?.next
         }
+
+        dismissWithError()
     }
 
     func getExtension(from url: URL, type: SharedAttachmentType) -> String {

@@ -4,7 +4,7 @@ import Photos
 import Intents
 import share_handler_ios_models
 
-public class SwiftShareHandlerIosPlatform: NSObject, FlutterPlugin, FlutterStreamHandler, ShareHandlerApi {
+public class SwiftShareHandlerIosPlatform: NSObject, FlutterPlugin, FlutterStreamHandler, ShareHandlerApi, FlutterSceneLifeCycleDelegate {
 
     static let kEventsChannel = "com.shoutsocial.share_handler/sharedMediaStream"
 
@@ -27,6 +27,7 @@ public class SwiftShareHandlerIosPlatform: NSObject, FlutterPlugin, FlutterStrea
         eventsChannel.setStreamHandler(instance)
 
         registrar.addApplicationDelegate(instance)
+        registrar.addSceneDelegate(instance)
     }
 
     public func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
@@ -77,10 +78,52 @@ public class SwiftShareHandlerIosPlatform: NSObject, FlutterPlugin, FlutterStrea
     public func application(_ application: UIApplication, continue userActivity: NSUserActivity, restorationHandler: @escaping ([Any]) -> Void) -> Bool {
         if let url = userActivity.webpageURL {
             if (hasMatchingSchemePrefix(url: url)) {
-                return handleUrl(url: url, setInitialData: true)
+                return handleUrl(url: url, setInitialData: false)
             }
         }
         return false
+    }
+
+    public func scene(
+        _ scene: UIScene,
+        willConnectTo session: UISceneSession,
+        options connectionOptions: UIScene.ConnectionOptions?
+    ) -> Bool {
+        guard let connectionOptions else {
+            return false
+        }
+
+        for urlContext in connectionOptions.urlContexts where hasMatchingSchemePrefix(url: urlContext.url) {
+            if handleUrl(url: urlContext.url, setInitialData: true) {
+                return true
+            }
+        }
+
+        for userActivity in connectionOptions.userActivities {
+            if let url = userActivity.webpageURL,
+               hasMatchingSchemePrefix(url: url),
+               handleUrl(url: url, setInitialData: true) {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    public func scene(_ scene: UIScene, openURLContexts urlContexts: Set<UIOpenURLContext>) -> Bool {
+        for urlContext in urlContexts where hasMatchingSchemePrefix(url: urlContext.url) {
+            if handleUrl(url: urlContext.url, setInitialData: false) {
+                return true
+            }
+        }
+        return false
+    }
+
+    public func scene(_ scene: UIScene, continue userActivity: NSUserActivity) -> Bool {
+        guard let url = userActivity.webpageURL, hasMatchingSchemePrefix(url: url) else {
+            return false
+        }
+        return handleUrl(url: url, setInitialData: false)
     }
 
     private func handleUrl(url: URL?, setInitialData: Bool) -> Bool {

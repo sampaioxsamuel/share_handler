@@ -1,3 +1,7 @@
+# 0.0.16
+Add UIScene lifecycle support
+Finish processing shared content before closing the extension
+Handle multiple input items and native errors safely
 # 0.0.15
 Fix for iOS 18
 Fix getFileName function to handle duplicate filenames
