@@ -2,6 +2,8 @@
 Safely copy content URIs into the app cache and prevent path traversal
 Move attachment I/O off the main thread
 Fix mixed text/media shares, repeated initial intents, and lifecycle cleanup
+Prevent duplicate initial stream delivery and prune stale or incomplete cache files
+Preserve cold-start versus live-stream routing without waiting for an Activity
 Migrate to Flutter 3.44, Dart 3.12, AGP 9, and built-in Kotlin
 # 0.0.11
 Upgrade Android dependencies and tools

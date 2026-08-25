@@ -21,8 +21,13 @@ abstract class ShareHandlerPlatform extends PlatformInterface {
     _instance = instance;
   }
 
-  /// Returns the initially stored shared media for single time use on app boot. Use media stream to receive shares while app is active.
-  /// NOTE. (iOS only) file attachments are copied to a temp folder and should be deleted after using them.
+  /// Returns the initially stored shared media for single time use on app boot.
+  /// Use [sharedMediaStream] to receive shares while the app is active.
+  ///
+  /// Attachment paths can be used directly during the current processing or
+  /// upload flow. They point to staging files rather than durable app storage;
+  /// see [SharedAttachment.path]. On iOS, remove staged files when they are no
+  /// longer needed.
   Future<SharedMedia?> getInitialSharedMedia() async {
     throw UnimplementedError('getInitialSharedMedia has not been implemented.');
   }

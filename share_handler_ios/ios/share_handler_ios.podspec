@@ -17,6 +17,11 @@ Pod::Spec.new do |s|
     'Classes/**/*.{h,m}',
     'share_handler_ios/Sources/share_handler_ios/**/*.swift'
   ]
+  s.resource_bundles = {
+    'share_handler_ios_privacy' => [
+      'share_handler_ios/Sources/share_handler_ios/PrivacyInfo.xcprivacy'
+    ]
+  }
   s.public_header_files = 'Classes/**/*.h'
   s.dependency 'Flutter'
   s.dependency 'share_handler_ios_models'

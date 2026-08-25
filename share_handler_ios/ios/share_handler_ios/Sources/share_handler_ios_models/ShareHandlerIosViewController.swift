@@ -8,9 +8,10 @@ import Contacts
 @available(iOS 14.0, *)
 @available(iOSApplicationExtension 14.0, *)
 open class ShareHandlerIosViewController: UIViewController {
+    private static let sharedKeyPrefix = "ShareKey-"
     static var hostAppBundleIdentifier = ""
     static var appGroupId = ""
-    let sharedKey = "ShareKey"
+    let sharedKey = "\(ShareHandlerIosViewController.sharedKeyPrefix)\(UUID().uuidString)"
     var sharedText: [String] = []
     let imageContentType = UTType.image.identifier
     let movieContentType = UTType.movie.identifier
@@ -25,18 +26,35 @@ open class ShareHandlerIosViewController: UIViewController {
         return UserDefaults(suiteName: ShareHandlerIosViewController.appGroupId)
     }()
 
-    public func loadIds() {
-        let shareExtensionAppBundleIdentifier = Bundle.main.bundleIdentifier!
-        let lastIndexOfPoint = shareExtensionAppBundleIdentifier.lastIndex(of: ".")
-        ShareHandlerIosViewController.hostAppBundleIdentifier = String(shareExtensionAppBundleIdentifier[..<lastIndexOfPoint!])
-        ShareHandlerIosViewController.appGroupId = (Bundle.main.object(forInfoDictionaryKey: "AppGroupId") as? String) ?? "group.\(ShareHandlerIosViewController.hostAppBundleIdentifier)"
+    @discardableResult
+    public func loadIds() -> Bool {
+        guard let shareExtensionAppBundleIdentifier = Bundle.main.bundleIdentifier,
+              let lastIndexOfPoint = shareExtensionAppBundleIdentifier.lastIndex(of: ".") else {
+            return false
+        }
+        let hostAppBundleIdentifier = String(shareExtensionAppBundleIdentifier[..<lastIndexOfPoint])
+        guard !hostAppBundleIdentifier.isEmpty else {
+            return false
+        }
+        let configuredAppGroupId = Bundle.main.object(forInfoDictionaryKey: "AppGroupId") as? String
+        let appGroupId = configuredAppGroupId.flatMap { $0.isEmpty ? nil : $0 }
+            ?? "group.\(hostAppBundleIdentifier)"
+        guard !appGroupId.isEmpty else {
+            return false
+        }
+        ShareHandlerIosViewController.hostAppBundleIdentifier = hostAppBundleIdentifier
+        ShareHandlerIosViewController.appGroupId = appGroupId
+        return true
     }
 
     public override func viewDidLoad() {
         super.viewDidLoad()
         view.isHidden = true
         navigationController?.setNavigationBarHidden(true, animated: false)
-        loadIds()
+        guard loadIds() else {
+            dismissWithError()
+            return
+        }
         Task {
             await handleInputItems()
         }
@@ -249,13 +267,15 @@ open class ShareHandlerIosViewController: UIViewController {
     }
 
     public func redirectToHostApp() {
-        loadIds()
+        guard loadIds() else {
+            dismissWithError()
+            return
+        }
         guard let url = URL(string: "ShareMedia-\(ShareHandlerIosViewController.hostAppBundleIdentifier)://\(ShareHandlerIosViewController.hostAppBundleIdentifier)?key=\(sharedKey)") else {
             dismissWithError()
             return
         }
         var responder = self as UIResponder?
-        let selectorOpenURL = sel_registerName("openURL:")
 
         let intent = self.extensionContext?.intent as? INSendMessageIntent
 
@@ -280,23 +300,22 @@ open class ShareHandlerIosViewController: UIViewController {
 
         while (responder != nil) {
             if let application = responder as? UIApplication {
-                if #available(iOS 18.0, *) {
-                    application.open(url, options: [:]) { [weak self] success in
+                application.open(url, options: [:]) { success in
+                    DispatchQueue.main.async {
                         if success {
-                            self?.extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
+                            self.extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
                         } else {
-                            self?.dismissWithError()
+                            userDefaults.removeObject(forKey: self.sharedKey)
+                            self.dismissWithError()
                         }
                     }
-                } else {
-                    let _ = application.perform(selectorOpenURL, with: url)
-                    extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
                 }
                 return
             }
             responder = responder?.next
         }
 
+        userDefaults.removeObject(forKey: sharedKey)
         dismissWithError()
     }
 

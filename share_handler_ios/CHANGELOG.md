@@ -2,6 +2,11 @@
 Add UIScene lifecycle support
 Finish processing shared content before closing the extension
 Handle multiple input items and native errors safely
+Include App Group UserDefaults privacy manifests in SwiftPM and CocoaPods
+Await message donation and report failures to Dart
+Validate callback URLs and only finish the extension after opening the host app
+Keep initial shares out of the live stream and buffer live events until listening
+Use one-time callback keys and consume extension payloads after opening the host
 # 0.0.15
 Fix for iOS 18
 Fix getFileName function to handle duplicate filenames

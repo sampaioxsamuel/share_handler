@@ -1,8 +1,14 @@
 # 0.0.26
 Android - Safely and asynchronously copy shared content URIs
 Android - Fix repeated intents, mixed text/media shares, and plugin lifecycle cleanup
+Android - Prevent duplicate initial stream delivery and prune stale attachment cache files
+Android - Preserve cold-start versus live-stream routing without waiting for an Activity
 Android - Migrate to AGP 9 built-in Kotlin support
 iOS - Add UIScene lifecycle support and complete share processing before closing the extension
+iOS - Include privacy manifests for App Group UserDefaults in SwiftPM and CocoaPods
+iOS - Await message donation, validate callback URLs, and report host opening failures
+iOS - Keep initial shares out of the live stream and buffer live events until listening
+iOS - Consume share-extension payloads through one-time callback keys
 # 0.0.25
 Android - Upgrade Android dependencies and tools
 # 0.0.23

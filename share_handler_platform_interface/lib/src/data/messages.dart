@@ -16,7 +16,11 @@ class SharedAttachment {
     required this.type,
   });
 
-  /// The path to the file on device
+  /// Path to a local staging file prepared by the platform implementation.
+  ///
+  /// The file can be used directly for immediate processing or upload. Copy it
+  /// to app-owned persistent storage only when it must survive delayed work,
+  /// retries, app restarts, or platform cache cleanup.
   String path;
   SharedAttachmentType type;
 

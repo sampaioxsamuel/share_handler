@@ -19,10 +19,16 @@ let package = Package(
             dependencies: [
                 .product(name: "FlutterFramework", package: "FlutterFramework"),
                 "share_handler_ios_models",
+            ],
+            resources: [
+                .process("PrivacyInfo.xcprivacy"),
             ]
         ),
         .target(
-            name: "share_handler_ios_models"
+            name: "share_handler_ios_models",
+            resources: [
+                .process("PrivacyInfo.xcprivacy"),
+            ]
         ),
     ]
 )

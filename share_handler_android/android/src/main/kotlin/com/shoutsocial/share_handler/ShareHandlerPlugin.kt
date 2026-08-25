@@ -26,9 +26,12 @@ import io.flutter.plugin.common.*
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InterruptedIOException
+import java.util.Collections
 import java.util.LinkedHashSet
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import java.util.concurrent.RejectedExecutionException
 
 private const val kEventsChannel = "com.shoutsocial.share_handler/sharedMediaStream"
@@ -37,6 +40,9 @@ private const val kMaxCacheBytes = 4L * 1024L * 1024L * 1024L
 private const val kMaxAttachmentsPerShare = 128
 private const val kMaxCacheFiles = 1024
 private const val kMaxPendingMediaEvents = 16
+// Cache paths are temporary; keep delivered files available across normal app sessions.
+private const val kCacheFileRetentionMillis = 7L * 24L * 60L * 60L * 1000L
+private const val kPartialCacheDirectoryName = ".partial"
 private val kCacheLock = Any()
 private val kCleanupExecutor = Executors.newSingleThreadExecutor()
 
@@ -44,6 +50,7 @@ private val kCleanupExecutor = Executors.newSingleThreadExecutor()
 class ShareHandlerPlugin : FlutterPlugin, Messages.ShareHandlerApi, EventChannel.StreamHandler, ActivityAware,
   PluginRegistry.NewIntentListener {
   private var initialMedia: Messages.SharedMedia? = null
+  private var initialMediaWasDelivered = false
   private var initialError: Throwable? = null
   private var eventChannel: EventChannel? = null
   private var eventSink: EventChannel.EventSink? = null
@@ -57,15 +64,21 @@ class ShareHandlerPlugin : FlutterPlugin, Messages.ShareHandlerApi, EventChannel
   private var ioExecutor: ExecutorService? = null
   private var isEngineAttached = false
   private var engineGeneration = 0
-  private var isInitialIntentPending = false
+  private var hasAttachedToActivity = false
+  private var initialMediaWasRequestedBeforeActivity = false
   private var initialIntentGeneration = 0
+  private var initialIntentFuture: Future<*>? = null
   private val pendingInitialResults = mutableListOf<Messages.Result<Messages.SharedMedia>>()
   private val pendingMediaEvents = mutableListOf<Messages.SharedMedia>()
+  private val protectedCachePaths = Collections.synchronizedSet(mutableSetOf<String>())
 
   override fun onAttachedToEngine(@NonNull flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
     applicationContext = flutterPluginBinding.applicationContext
     isEngineAttached = true
     engineGeneration++
+    hasAttachedToActivity = false
+    initialMediaWasRequestedBeforeActivity = false
+    initialIntentFuture = null
     ioExecutor = Executors.newSingleThreadExecutor()
 
     val messenger = flutterPluginBinding.binaryMessenger
@@ -82,18 +95,26 @@ class ShareHandlerPlugin : FlutterPlugin, Messages.ShareHandlerApi, EventChannel
     eventChannel?.setStreamHandler(null)
     eventChannel = null
     eventSink = null
-    deleteMediaFilesAsync(initialMedia)
+    if (initialMediaWasDelivered) {
+      unprotectMediaFiles(initialMedia)
+    } else {
+      deleteMediaFilesAsync(initialMedia)
+    }
     initialMedia = null
+    initialMediaWasDelivered = false
     initialError = null
     pendingMediaEvents.forEach(::deleteMediaFilesAsync)
     pendingMediaEvents.clear()
+    protectedCachePaths.clear()
     isEngineAttached = false
     engineGeneration++
+    hasAttachedToActivity = false
+    initialMediaWasRequestedBeforeActivity = false
+    initialIntentGeneration++
+    initialIntentFuture?.cancel(true)
+    initialIntentFuture = null
     ioExecutor?.shutdownNow()
     ioExecutor = null
-    isInitialIntentPending = false
-    initialIntentGeneration++
-    initialError = null
     pendingInitialResults.forEach { it.success(null) }
     pendingInitialResults.clear()
   }
@@ -134,10 +155,25 @@ class ShareHandlerPlugin : FlutterPlugin, Messages.ShareHandlerApi, EventChannel
 
   override fun getInitialSharedMedia(result: Messages.Result<Messages.SharedMedia>?) {
     if (result == null) return
-    if (isInitialIntentPending) {
+    if (!hasAttachedToActivity) {
+      initialMediaWasRequestedBeforeActivity = true
+      result.success(null)
+      return
+    }
+    if (initialIntentFuture != null) {
       pendingInitialResults.add(result)
     } else {
-      initialError?.let(result::error) ?: result.success(initialMedia)
+      val error = initialError
+      if (error != null) {
+        result.error(error)
+      } else {
+        val media = initialMedia
+        if (media != null) {
+          initialMediaWasDelivered = true
+          unprotectMediaFiles(media)
+        }
+        result.success(media)
+      }
     }
   }
 
@@ -178,10 +214,17 @@ class ShareHandlerPlugin : FlutterPlugin, Messages.ShareHandlerApi, EventChannel
   }
 
   override fun resetInitialSharedMedia() {
-    initialMedia = null
-    initialError = null
     initialIntentGeneration++
-    isInitialIntentPending = false
+    initialIntentFuture?.cancel(true)
+    initialIntentFuture = null
+    if (initialMediaWasDelivered) {
+      unprotectMediaFiles(initialMedia)
+    } else {
+      deleteMediaFilesAsync(initialMedia)
+    }
+    initialMedia = null
+    initialMediaWasDelivered = false
+    initialError = null
     pendingInitialResults.forEach { it.success(null) }
     pendingInitialResults.clear()
     consumeActivityShareIntent()
@@ -190,7 +233,10 @@ class ShareHandlerPlugin : FlutterPlugin, Messages.ShareHandlerApi, EventChannel
   override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
     eventSink = events
     if (events != null) {
-      pendingMediaEvents.forEach { events.success(it.toMap()) }
+      pendingMediaEvents.forEach { media ->
+        events.success(media.toMap())
+        unprotectMediaFiles(media)
+      }
       pendingMediaEvents.clear()
     }
   }
@@ -202,12 +248,17 @@ class ShareHandlerPlugin : FlutterPlugin, Messages.ShareHandlerApi, EventChannel
   override fun onAttachedToActivity(binding: ActivityPluginBinding) {
     this.binding = binding
     binding.addOnNewIntentListener(this)
+    val isFirstActivity = !hasAttachedToActivity
+    val initial = isFirstActivity && !initialMediaWasRequestedBeforeActivity
+    hasAttachedToActivity = true
+
     val flags: Int = binding.activity.intent.flags
     if ((flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0) {
       // The activity was launched from history
-      Log.w("TAG", "Handle skip: The activity was launched from history")
+      Log.w("ShareHandler", "Skipping share: activity was launched from history")
+      if (initial) handleIntent(Intent(), true)
     } else {
-      handleIntent(binding.activity.intent, true)
+      handleIntent(binding.activity.intent, initial)
     }
   }
 
@@ -239,13 +290,16 @@ class ShareHandlerPlugin : FlutterPlugin, Messages.ShareHandlerApi, EventChannel
   private fun handleIntent(intent: Intent, initial: Boolean) {
     val initialGeneration = if (initial) ++initialIntentGeneration else 0
     val taskEngineGeneration = engineGeneration
+    if (initial) {
+      initialIntentFuture?.cancel(true)
+      initialIntentFuture = null
+    }
     if (!isShareIntent(intent)) {
       if (initial) completeIntent(null, null, true, initialGeneration, taskEngineGeneration)
       return
     }
 
     val intentSnapshot = Intent(intent)
-    if (initial) isInitialIntentPending = true
 
     val executor = ioExecutor
     if (executor == null) {
@@ -259,19 +313,25 @@ class ShareHandlerPlugin : FlutterPlugin, Messages.ShareHandlerApi, EventChannel
       return
     }
 
+    val task = Runnable {
+      var media: Messages.SharedMedia? = null
+      var error: Throwable? = null
+      try {
+        media = mediaFromIntent(intentSnapshot)
+      } catch (throwable: Throwable) {
+        error = throwable
+        Log.e("ShareHandler", "Error parsing shared content", throwable)
+      }
+      mainHandler.post {
+        completeIntent(media, error, initial, initialGeneration, taskEngineGeneration)
+      }
+    }
+
     try {
-      executor.execute {
-        var media: Messages.SharedMedia? = null
-        var error: Throwable? = null
-        try {
-          media = mediaFromIntent(intentSnapshot)
-        } catch (throwable: Throwable) {
-          error = throwable
-          Log.e("ShareHandler", "Error parsing shared content", throwable)
-        }
-        mainHandler.post {
-          completeIntent(media, error, initial, initialGeneration, taskEngineGeneration)
-        }
+      if (initial) {
+        initialIntentFuture = executor.submit(task)
+      } else {
+        executor.execute(task)
       }
     } catch (exception: RejectedExecutionException) {
       completeIntent(null, exception, initial, initialGeneration, taskEngineGeneration)
@@ -295,15 +355,25 @@ class ShareHandlerPlugin : FlutterPlugin, Messages.ShareHandlerApi, EventChannel
         deleteMediaFilesAsync(media)
         return
       }
+      initialIntentFuture = null
+      if (initialMediaWasDelivered) {
+        unprotectMediaFiles(initialMedia)
+      } else {
+        deleteMediaFilesAsync(initialMedia)
+      }
       initialMedia = media
+      initialMediaWasDelivered = false
+      protectMediaFiles(media)
       initialError = error
-      isInitialIntentPending = false
       val results = pendingInitialResults.toList()
       pendingInitialResults.clear()
+      if (error == null && media != null && results.isNotEmpty()) {
+        initialMediaWasDelivered = true
+        unprotectMediaFiles(media)
+      }
       results.forEach { result ->
         if (error != null) result.error(error) else result.success(media)
       }
-      if (media != null) eventSink?.success(media.toMap())
       return
     }
 
@@ -320,6 +390,7 @@ class ShareHandlerPlugin : FlutterPlugin, Messages.ShareHandlerApi, EventChannel
       if (pendingMediaEvents.size >= kMaxPendingMediaEvents) {
         deleteMediaFilesAsync(pendingMediaEvents.removeAt(0))
       }
+      protectMediaFiles(media)
       pendingMediaEvents.add(media)
     }
   }
@@ -347,7 +418,7 @@ class ShareHandlerPlugin : FlutterPlugin, Messages.ShareHandlerApi, EventChannel
     }
 
     val cacheDirectory = shareCacheDirectory()
-    val cacheFiles = cacheDirectory.listFiles()?.filter(File::isFile).orEmpty()
+    val cacheFiles = cacheFilesAfterPruning(cacheDirectory)
     if (cacheFiles.size + uris.size > kMaxCacheFiles) {
       throw IOException("Share cache file limit is exhausted")
     }
@@ -362,7 +433,7 @@ class ShareHandlerPlugin : FlutterPlugin, Messages.ShareHandlerApi, EventChannel
     try {
       uris.forEach { uri -> attachments.add(attachmentForUri(uri, intent.type, budget)) }
     } catch (throwable: Throwable) {
-      attachments.forEach { attachment -> File(attachment.path).delete() }
+      attachments.forEach { attachment -> deleteFinalizedAttachmentAfterFailure(File(attachment.path)) }
       throw throwable
     }
     attachments
@@ -447,16 +518,21 @@ class ShareHandlerPlugin : FlutterPlugin, Messages.ShareHandlerApi, EventChannel
     val cacheDirectory = shareCacheDirectory()
 
     val fileName = safeFileName(contentResolver, uri, mimeType)
-    val destinationFile = uniqueCacheFile(cacheDirectory, fileName)
+    val destinationFile = uniqueCachePath(cacheDirectory, fileName)
+    val partialFile = uniqueCacheFile(partialCacheDirectory(cacheDirectory), destinationFile.name)
+    var finalized = false
 
     try {
+      throwIfCopyInterrupted()
       val inputStream = contentResolver.openInputStream(uri)
         ?: throw IOException("Unable to open shared URI: $uri")
       inputStream.use { input ->
-        FileOutputStream(destinationFile).use { output ->
+        FileOutputStream(partialFile).use { output ->
           val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
           while (true) {
+            throwIfCopyInterrupted()
             val bytesRead = input.read(buffer)
+            throwIfCopyInterrupted()
             if (bytesRead < 0) break
             budget.remainingBytes -= bytesRead
             if (budget.remainingBytes < 0) {
@@ -466,18 +542,49 @@ class ShareHandlerPlugin : FlutterPlugin, Messages.ShareHandlerApi, EventChannel
           }
         }
       }
+      throwIfCopyInterrupted()
+      if (destinationFile.exists() || !partialFile.renameTo(destinationFile)) {
+        throw IOException("Unable to finalize shared attachment")
+      }
+      finalized = true
+
+      return Messages.SharedAttachment.Builder()
+        .setPath(destinationFile.absolutePath)
+        .setType(getAttachmentType(mimeType))
+        .build()
     } catch (throwable: Throwable) {
-      destinationFile.delete()
+      if (!partialFile.delete() && partialFile.exists()) {
+        Log.w("ShareHandler", "Unable to delete partial share attachment")
+      }
+      if (finalized) deleteFinalizedAttachmentAfterFailure(destinationFile)
       throw throwable
     }
-
-    return Messages.SharedAttachment.Builder()
-      .setPath(destinationFile.absolutePath)
-      .setType(getAttachmentType(mimeType))
-      .build()
   }
 
   private class CopyBudget(var remainingBytes: Long)
+
+  private fun deleteFinalizedAttachmentAfterFailure(file: File) {
+    try {
+      if (!file.exists() || file.delete()) return
+
+      val retryTimestamp =
+        (System.currentTimeMillis() - kCacheFileRetentionMillis - 1L).coerceAtLeast(1L)
+      val markedForRetry = file.setLastModified(retryTimestamp)
+      if (markedForRetry) {
+        Log.w(
+          "ShareHandler",
+          "Unable to delete finalized share attachment; marked it for cleanup retry",
+        )
+      } else {
+        Log.w(
+          "ShareHandler",
+          "Unable to delete finalized share attachment or mark it for cleanup retry",
+        )
+      }
+    } catch (exception: SecurityException) {
+      Log.w("ShareHandler", "Unable to clean up finalized share attachment", exception)
+    }
+  }
 
   private fun shareCacheDirectory(): File {
     val directory = File(applicationContext.cacheDir, "share_handler")
@@ -485,6 +592,38 @@ class ShareHandlerPlugin : FlutterPlugin, Messages.ShareHandlerApi, EventChannel
       throw IOException("Unable to create share cache directory")
     }
     return directory.canonicalFile
+  }
+
+  private fun cacheFilesAfterPruning(cacheDirectory: File): List<File> {
+    val partialDirectory = partialCacheDirectory(cacheDirectory)
+    partialDirectory.listFiles()?.filter(File::isFile).orEmpty().forEach { file ->
+      if (!file.delete()) Log.w("ShareHandler", "Unable to delete orphaned partial share file")
+    }
+
+    val expirationCutoff = System.currentTimeMillis() - kCacheFileRetentionMillis
+    cacheDirectory.listFiles()?.filter(File::isFile).orEmpty().forEach { file ->
+      val lastModified = file.lastModified()
+      val isExpiredFile = lastModified > 0L && lastModified <= expirationCutoff
+      if (isExpiredFile && file.absolutePath !in protectedCachePaths && !file.delete()) {
+        Log.w("ShareHandler", "Unable to delete stale share cache file")
+      }
+    }
+    val cacheFiles = cacheDirectory.listFiles()?.filter(File::isFile).orEmpty()
+    val orphanedPartialFiles = partialDirectory.listFiles()?.filter(File::isFile).orEmpty()
+    return cacheFiles + orphanedPartialFiles
+  }
+
+  private fun partialCacheDirectory(cacheDirectory: File): File {
+    val directory = File(cacheDirectory, kPartialCacheDirectoryName)
+    if (!directory.exists() && !directory.mkdirs()) {
+      throw IOException("Unable to create partial share cache directory")
+    }
+    if (!directory.isDirectory) throw IOException("Partial share cache path is not a directory")
+    val canonicalDirectory = directory.canonicalFile
+    if (canonicalDirectory.parentFile != cacheDirectory.canonicalFile) {
+      throw SecurityException("Partial share file escaped cache directory")
+    }
+    return canonicalDirectory
   }
 
   private fun safeFileName(contentResolver: ContentResolver, uri: Uri, mimeType: String?): String {
@@ -516,7 +655,7 @@ class ShareHandlerPlugin : FlutterPlugin, Messages.ShareHandlerApi, EventChannel
     return truncateFileName(fileName)
   }
 
-  private fun uniqueCacheFile(cacheDirectory: File, fileName: String): File {
+  private fun uniqueCachePath(cacheDirectory: File, fileName: String): File {
     val canonicalDirectory = cacheDirectory.canonicalFile
     val extension = File(fileName).extension
     val baseName = File(fileName).nameWithoutExtension.ifEmpty { "shared" }
@@ -534,9 +673,30 @@ class ShareHandlerPlugin : FlutterPlugin, Messages.ShareHandlerApi, EventChannel
       if (candidate.parentFile != canonicalDirectory) {
         throw SecurityException("Shared file escaped cache directory")
       }
-      if (candidate.createNewFile()) return candidate
+      if (!candidate.exists()) return candidate
       suffix++
     }
+  }
+
+  private fun uniqueCacheFile(cacheDirectory: File, fileName: String): File {
+    while (true) {
+      val candidate = uniqueCachePath(cacheDirectory, fileName)
+      if (candidate.createNewFile()) return candidate
+    }
+  }
+
+  private fun throwIfCopyInterrupted() {
+    if (Thread.currentThread().isInterrupted) {
+      throw InterruptedIOException("Shared attachment copy was cancelled")
+    }
+  }
+
+  private fun protectMediaFiles(media: Messages.SharedMedia?) {
+    media?.attachments?.forEach { attachment -> protectedCachePaths.add(attachment.path) }
+  }
+
+  private fun unprotectMediaFiles(media: Messages.SharedMedia?) {
+    media?.attachments?.forEach { attachment -> protectedCachePaths.remove(attachment.path) }
   }
 
   private fun truncateFileName(fileName: String): String {
@@ -570,6 +730,7 @@ class ShareHandlerPlugin : FlutterPlugin, Messages.ShareHandlerApi, EventChannel
   private fun deleteMediaFilesAsync(media: Messages.SharedMedia?) {
     val paths = media?.attachments?.map { attachment -> attachment.path }.orEmpty()
     if (paths.isEmpty()) return
+    paths.forEach { path -> protectedCachePaths.remove(path) }
 
     kCleanupExecutor.execute {
       synchronized(kCacheLock) {
@@ -581,7 +742,7 @@ class ShareHandlerPlugin : FlutterPlugin, Messages.ShareHandlerApi, EventChannel
         paths.forEach { path ->
           try {
             val file = File(path).canonicalFile
-            if (file.parentFile == cacheDirectory) file.delete()
+            if (file.parentFile == cacheDirectory) deleteFinalizedAttachmentAfterFailure(file)
           } catch (_: IOException) {
             // Ignore cleanup failures for files that were never delivered.
           }
