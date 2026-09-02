@@ -1,4 +1,5 @@
 # 0.0.12
+Fix Kotlin JVM getter signature clash
 Safely copy content URIs into the app cache and prevent path traversal
 Move attachment I/O off the main thread
 Fix mixed text/media shares, repeated initial intents, and lifecycle cleanup

@@ -58,7 +58,7 @@ class ShareHandlerPlugin : FlutterPlugin, Messages.ShareHandlerApi, EventChannel
   private var binding: ActivityPluginBinding? = null
   private lateinit var applicationContext: Context
   private val ownProviderAuthorities: Set<String> by lazy {
-    getOwnProviderAuthorities()
+    loadOwnProviderAuthorities()
   }
   private val mainHandler = Handler(Looper.getMainLooper())
   private var ioExecutor: ExecutorService? = null
@@ -477,7 +477,7 @@ class ShareHandlerPlugin : FlutterPlugin, Messages.ShareHandlerApi, EventChannel
   }
 
   @Suppress("DEPRECATION")
-  private fun getOwnProviderAuthorities(): Set<String> {
+  private fun loadOwnProviderAuthorities(): Set<String> {
     val packageInfo = applicationContext.packageManager.getPackageInfo(
       applicationContext.packageName,
       PackageManager.GET_PROVIDERS,
