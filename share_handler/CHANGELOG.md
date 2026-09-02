@@ -1,4 +1,5 @@
 # 0.0.26
+Dart - Resolve Android and iOS implementations from the same Git checkout
 Android - Safely and asynchronously copy shared content URIs
 Android - Fix repeated intents, mixed text/media shares, and plugin lifecycle cleanup
 Android - Prevent duplicate initial stream delivery and prune stale attachment cache files
